@@ -7,6 +7,7 @@ A weather display for the LilyGO T-Display-S3 featuring:
 - NTP time synchronization
 - Adjustable display brightness
 - Performance monitoring (FPS counter)
+- Wi-Fi signal strength
 
 ## Features
 
@@ -17,8 +18,10 @@ A weather display for the LilyGO T-Display-S3 featuring:
 - NTP time synchronization with configurable GMT offset
 - Display brightness adjustment using hardware buttons
 - Performance monitoring with real-time FPS counter
+- Wi-Fi signal strength monitoring (in dBm)
 - Automatic weather data updates every 5 minutes
-- WiFi configuration portal for easy setup
+- Wi-Fi configuration portal for easy setup
+- Retry functionality if time/weather updates fail
 
 ## Hardware Configuration
 | Function      | GPIO Pin |
