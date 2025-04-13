@@ -39,52 +39,95 @@ String owmAPI = "YOUR_API_KEY"; // your Open Weather Map API key
 String units = "metric";  // metric, imperial
 //##########################################################
 
+// Button pins
+int BootButton = 0; // GPIO0 for left button (used to decrease brightness)
+int KeyButton = 14; // GPIO14 for right button (used to increase brightness)
+
 const char* ntpServer = "pool.ntp.org";
 
 // Store coordinates after first successful lookup
 float storedLat = 0;
 float storedLon = 0;
 
-// additional variables
+// Additional variables
+int brightness = 175; // initial brightness (half of 100-250 in steps of 25 - lower than 80 causes screen flickering)
 int scrollPosition = 100;
-float maxTemp;
-float minTemp;
 bool firstUpdate = true;
 unsigned long lastUpdate = 0;
 int updatesCounter = 0;
 unsigned long lastMillis = 0;
+long lastFrameTime = 0;  // for FPS calculation
+int framesPerSecond = 0; // current FPS
 
-// colours
+// Colours
 #define bck TFT_BLACK
 unsigned short greys[13];
 
-// static strings of data showed on right side 
+// Static strings of data showed on right side 
 const char* dataLabel[] = { "HUMID", "PRESS", "WIND" };
 String dataLabelUnits[] = { "%", "hPa", "m/s" };
 
-// data that changes
+// Weather data variables
 float temperature = 00.00;
 float feelsLike = 00.00;
+float maxTemp;
+float minTemp;
 float weatherMetrics[3];
-float tempHistory[24] = {};       //graph
-float tempHistoryTemp[24] = {};   //graph
-int tempHistoryGraph[24] = { 0 }; //graph
+float tempHistory[24] = {};
+float tempHistoryTemp[24] = {};
+int tempHistoryGraph[24] = { 0 };
 
-// scrolling message on bottom right side
+// Scrolling message on bottom right side
 String scrollMessage = "";
 String conditions = "";
 String sunriseTime = "";
 String sunsetTime = "";
+
+// Retry mechanism variables
+unsigned long lastRetryTime = 0;
+const unsigned long retryInterval = 10000; // 10 seconds between retries
+int timeSyncRetries = 0;
+int weatherRetries = 0;
+const int maxRetries = 3;
+bool timeSyncNeeded = false;
+bool weatherSyncNeeded = false;
 
 
 /*************************************************************
 ********************** HELPER FUNCTIONS **********************
 **************************************************************/
 
+// Function to adjust screen brightness using buttons
+void adjustBrightness() {
+  // Static variables to store previous button states
+  static uint8_t prevBootBtn = HIGH, prevKeyBtn = HIGH;
+  const int step = 25; // step size (25 provides 7 steps between 100-250)
+  
+  // Read current button states (active LOW)
+  uint8_t currBootBtn = digitalRead(BootButton);
+  uint8_t currKeyBtn = digitalRead(KeyButton);
+  
+  // Detect falling edge (HIGH->LOW transition) on Boot button
+  if (prevBootBtn == HIGH && currBootBtn == LOW) {
+    brightness = constrain(brightness - step, 100, 250); // decrease brightness, constrained to 100-250 range
+    analogWrite(TFT_BL, brightness); // apply new brightness to backlight pin
+  }
+  
+  // Detect falling edge (HIGH->LOW transition) on Key button
+  if (prevKeyBtn == HIGH && currKeyBtn == LOW) {
+    brightness = constrain(brightness + step, 100, 250); // increase brightness, constrained to 100-250 range
+    analogWrite(TFT_BL, brightness); // apply new brightness to backlight pin
+  }
+  
+  // Store current button states for next iteration
+  prevBootBtn = currBootBtn;
+  prevKeyBtn = currKeyBtn;
+}
+
 // Function to convert UNIX timestamp to readable time
 String formatUnixTime(long unixTime) {
   // Convert UNIX timestamp to readable time (HH:MM)
-  int hours = (unixTime % 86400L) / 3600 + offsetGMT; // Adjust for timezone
+  int hours = (unixTime % 86400L) / 3600 + offsetGMT; // adjust for timezone
   int minutes = (unixTime % 3600) / 60;
   
   if (hours >= 24) hours -= 24;
@@ -122,6 +165,7 @@ bool getLocationCords() {
   if (storedLat != 0 && storedLon != 0) return true;
 
   String urlLocation = "";
+  // Replace any spaces in the location name with URL syntax
   for (int i = 0; i < location.length(); i++) {
     if (location[i] == ' ') {
       urlLocation += "%20";
@@ -153,13 +197,8 @@ bool getLocationCords() {
   return false; // coordinates not found
 }
 
-// Function to get current weather data
-void getWeatherData() {
-  if (!getLocationCords()) {
-    scrollMessage = "Error: Could not get location coordinates";
-    return;
-  }
-
+// Function to get current weather data (returns true if successful)
+bool getWeatherData() {
   // Get current weather with stored coordinates
   String weatherUrl = "https://api.openweathermap.org/data/2.5/weather?lat=" + 
                      String(storedLat, 6) + "&lon=" + String(storedLon, 6) + 
@@ -198,7 +237,7 @@ void getWeatherData() {
       
       // Get weather description
       conditions = weatherDoc["weather"][0]["description"].as<String>();
-      conditions.setCharAt(0, toupper(conditions[0])); // Capitalize first letter
+      conditions.setCharAt(0, toupper(conditions[0])); // capitalize first letter
       
       // Get sunrise/sunset times
       long sunrise = weatherDoc["sys"]["sunrise"];
@@ -208,35 +247,81 @@ void getWeatherData() {
       
       // Update message
       scrollMessage = "#Conditions: " + conditions + "  #Feels like: " + formatTemperature(feelsLike) + "C" + "  #Sunrise: " + sunriseTime + "  #Sunset: " + sunsetTime;
-    } else {
-      scrollMessage = "Error: Failed to parse weather data";
+      httpWeather.end();
+      return true;
     }
-  } else {
-    scrollMessage = "Error: Could not connect to weather service (" + String(weatherCode) + ")";
   }
+  
   httpWeather.end();
+  return false;
 }
 
 // Function to update weather data
 void updateData() {
   // Update scrolling message position
   scrollPosition--;
-  if (scrollPosition < -450) scrollPosition = 180; // Changed -420 to -450 | 100 to 180
+  if (scrollPosition < -450) scrollPosition = 180; // changed -420 to -450 | 100 to 180
 
-  // Update weather data every 5 minutes (300000 ms)
-  if (millis() > lastUpdate + 300000) { 
-    lastUpdate = millis();
+  // Current time for retry checks
+  unsigned long currentMillis = millis();
+
+  // Check if we need to retry time sync
+  if (timeSyncNeeded && currentMillis > lastRetryTime + retryInterval) {
+    if (timeSyncRetries < maxRetries) {
+      struct tm timeinfo;
+      if (getLocalTime(&timeinfo)) {
+        rtc.setTimeStruct(timeinfo);
+        timeSyncNeeded = false;
+        timeSyncRetries = 0;
+      } else {
+        timeSyncRetries++;
+        lastRetryTime = currentMillis;
+      }
+    }
+  }
+
+  // Check if we need to retry weather data
+  if (weatherSyncNeeded && currentMillis > lastRetryTime + retryInterval) {
+    if (weatherRetries < maxRetries) {
+      if (getWeatherData()) {  // modified to return bool (see next step)
+        weatherSyncNeeded = false;
+        weatherRetries = 0;
+      } else {
+        weatherRetries++;
+        lastRetryTime = currentMillis;
+      }
+    }
+  }
+
+  // Regular update check (every 5 minutes)
+  if (currentMillis > lastUpdate + 300000) { 
+    lastUpdate = currentMillis;
     updatesCounter++;
-
+    
     // Reset counter if it reaches 1000 (not enough space for 4 digits)
     if (updatesCounter >= 1000) {
       updatesCounter = 1;
     }
 
-    getWeatherData();
+    // Try to sync time first
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+      timeSyncNeeded = true;
+      timeSyncRetries = 0;
+      lastRetryTime = currentMillis;
+    } else {
+      rtc.setTimeStruct(timeinfo);
+      timeSyncNeeded = false;
+    }
 
-    // Sync time with NTP
-    setTime();
+    // Then try to get weather data
+    if (!getWeatherData()) {  // modified to return bool (see next step)
+      weatherSyncNeeded = true;
+      weatherRetries = 0;
+      lastRetryTime = currentMillis;
+    } else {
+      weatherSyncNeeded = false;
+    }
 
     // Update min and max temperatures
     if (temperature < minTemp) {
@@ -263,122 +348,128 @@ void updateData() {
   }
 }
 
+// Function to calculate and update FPS
+void updateFPS() {
+  // Calculate FPS
+  framesPerSecond = 1000 / (millis() - lastFrameTime);
+  lastFrameTime = millis();
+}
+
 // Function to draw the display
 void drawDisplay() {
+  // Update error sprite with scrolling message
   errSprite.fillSprite(greys[10]);
   errSprite.setTextColor(greys[1], greys[10]);
   errSprite.drawString(scrollMessage, scrollPosition, 4);
-
+  
+  // Clear main sprite and draw divider line
   sprite.fillSprite(TFT_BLACK);
   sprite.drawLine(138, 10, 138, 164, greys[6]);
   sprite.setTextDatum(0);
-
-  // LEFTSIDE
+  
+  // Left side elements
   sprite.loadFont(midleFont);
   sprite.setTextColor(greys[1], TFT_BLACK);
   sprite.drawString("WEATHER", 6, 10);
   sprite.unloadFont();
-
+  
   sprite.loadFont(font18);
   sprite.setTextColor(greys[7], TFT_BLACK);
-  sprite.drawString("LOC:", 11, 110); // Shifted right 5px (from 6)
+  sprite.drawString("LOC:", 11, 110); // changed from 6 to 11
   sprite.setTextColor(greys[2], TFT_BLACK);
-  if (units == "metric")
-    sprite.drawString("C", 19, 50); // Shifted right 5px (from 14)
-  if (units == "imperial")
-    sprite.drawString("F", 19, 50); // Shifted right 5px (from 14)
-
+  sprite.drawString(units == "metric" ? "C" : "F", 19, 50); // changed from 14 to 19
+  sprite.fillCircle(13, 52, 2, greys[2]); // changed from 8 to 13
+  
   sprite.setTextColor(greys[3], TFT_BLACK);
-  sprite.drawString(location, 45, 110); // Shifted right 5px (from 40)
-  sprite.fillCircle(13, 52, 2, greys[2]); // Shifted right 5px (from 8)
+  sprite.drawString(location, 45, 110); // changed from 40 to 45
   sprite.unloadFont();
-
-  // draw time without seconds
+  
+  // Draw time (without seconds)
   sprite.loadFont(tinyFont);
   sprite.setTextColor(greys[4], TFT_BLACK);
-  sprite.drawString(rtc.getTime().substring(0, 5), 11, 132); // Shifted right 5px (from 6)
+  sprite.drawString(rtc.getTime().substring(0, 5), 10, 132); // changed from 6 to 10
   sprite.unloadFont();
-
-  // draw some static text
+  
+  // Static text elements
   sprite.setTextColor(greys[5], TFT_BLACK);
   sprite.drawString("INTERNET", 86, 10);
   sprite.drawString("STATION", 86, 20);
   
-  sprite.setTextColor(greys[7], TFT_BLACK);
-  sprite.drawString("SECONDS", 80, 157); // Shifted right 5px (from 75)
-
-  // draw temperature
+  // Main temperature display
   sprite.setTextDatum(4);
   sprite.loadFont(bigFont);
   sprite.setTextColor(greys[0], TFT_BLACK);
-  sprite.drawFloat(temperature, 1, 74, 80); // Shifted right 5px (from 69)
+  sprite.drawFloat(temperature, 1, 74, 80);
   sprite.unloadFont();
-
-  // draw seconds rectangle
-  sprite.fillRoundRect(80, 132, 42, 22, 2, greys[2]); // Shifted right 5px (from 75)
-  // draw seconds
+  
+  // Seconds display
+  sprite.fillRoundRect(92, 132, 23, 22, 2, greys[2]); // changed from 80 to 90 | changed from 22 to 23
   sprite.loadFont(font18);
   sprite.setTextColor(TFT_BLACK, greys[2]);
-  sprite.drawString(rtc.getTime().substring(6, 8), 101, 145); // Shifted right 5px (from 96)
+  sprite.drawString(rtc.getTime().substring(6, 8), 103, 145); // changed from 96 to 103
   sprite.unloadFont();
-
   sprite.setTextDatum(0);
 
-  // RIGHT SIDE
+  // FPS display
+  sprite.setTextColor(greys[7], TFT_BLACK);
+  sprite.drawString("FPS:" + String(framesPerSecond), 92, 157);
+  
+  // Right side elements
   sprite.loadFont(font18);
   sprite.setTextColor(greys[1], TFT_BLACK);
   sprite.drawString("LAST 12 HOURS", 144, 10);
   sprite.unloadFont();
-
+  
   sprite.fillRect(144, 28, 84, 2, greys[10]);
-
+  
+  // Min/Max temperature display
   sprite.setTextColor(greys[3], TFT_BLACK);
-  if (units == "metric") {
-    sprite.drawString("MIN:" + String(minTemp) + "C", 252, 10);
-    sprite.drawString("MAX:" + String(maxTemp) + "C", 252, 20);
-  }
-  if (units == "imperial") {
-    sprite.drawString("MIN:" + String(minTemp) + "F", 252, 10);
-    sprite.drawString("MAX:" + String(maxTemp) + "F", 252, 20);
-  }
+  String tempUnit = units == "metric" ? "C" : "F";
+  sprite.drawString("MIN:" + String(minTemp) + tempUnit, 252, 10);
+  sprite.drawString("MAX:" + String(maxTemp) + tempUnit, 252, 20);
+  
+  // Temperature graph
   sprite.fillSmoothRoundRect(144, 34, 174, 60, 3, greys[10], bck);
   sprite.drawLine(170, 39, 170, 88, TFT_WHITE);
   sprite.drawLine(170, 88, 314, 88, TFT_WHITE);
-
+  
   sprite.setTextDatum(4);
-
-  for (int j = 0; j < 24; j++)
-    for (int i = 0; i < tempHistoryGraph[j]; i++)
+  for (int j = 0; j < 24; j++) {
+    for (int i = 0; i < tempHistoryGraph[j]; i++) {
       sprite.fillRect(173 + (j * 6), 83 - (i * 4), 4, 3, greys[2]);
-
+    }
+  }
+  
   sprite.setTextColor(greys[2], greys[10]);
   sprite.drawString("MAX", 158, 42);
   sprite.drawString("MIN", 158, 86);
-
+  
   sprite.loadFont(font18);
   sprite.setTextColor(greys[7], greys[10]);
-  sprite.drawString("T", 158, 65); // Changed from 58 to 65
+  sprite.drawString("T", 158, 65); // changed from 58 to 65
   sprite.unloadFont();
-
+  
+  // Weather metrics boxes
   for (int i = 0; i < 3; i++) {
     sprite.fillSmoothRoundRect(144 + (i * 60), 100, 54, 32, 3, greys[9], bck);
     sprite.setTextColor(greys[3], greys[9]);
     sprite.drawString(dataLabel[i], 144 + (i * 60) + 27, 107);
     sprite.setTextColor(greys[2], greys[9]);
     sprite.loadFont(font18);
-    sprite.drawString(String((int)weatherMetrics[i])+dataLabelUnits[i], 144 + (i * 60) + 27, 124);
+    sprite.drawString(String((int)weatherMetrics[i]) + dataLabelUnits[i], 144 + (i * 60) + 27, 124);
     sprite.unloadFont();
-
-    sprite.fillSmoothRoundRect(144, 148, 174, 16, 2, greys[10], bck);
-    errSprite.pushToSprite(&sprite, 148, 150);
   }
-
+  
+  // Bottom status bar
+  sprite.fillSmoothRoundRect(144, 148, 174, 16, 2, greys[10], bck);
+  errSprite.pushToSprite(&sprite, 148, 150);
+  
   sprite.setTextColor(greys[4], bck);
-  sprite.drawString("CURRENT INFO", 182, 142); // Changed from 141 to 142
-  sprite.setTextColor(greys[7], bck); // Changed from greys[9] to greys[7]
-  sprite.drawString("UPDATES:", 272, 142); // Changed from 277 to 272 | 141 to 142
-  sprite.drawString(String(updatesCounter), 300, 142); // Changed from 305 to 300 | 141 to 142
-
+  sprite.drawString("CURRENT INFO", 182, 142); // changed from 141 to 142
+  sprite.setTextColor(greys[7], bck);          // changed from greys[9] to greys[7]
+  sprite.drawString("UPDATES: " + String(updatesCounter), 272, 142); // changed from 277 to 272 | 141 to 142
+  
+  // Push final sprite to display
   sprite.pushSprite(0, 0);
 }
 
@@ -405,27 +496,26 @@ void setup() {
   ledcAttachPin(38, 0);
   ledcWrite(0, 130);
   
-  // Display WiFi connection message
-  lcd.println("\nConnecting to WiFi - please wait...");
+  // Display Wi-Fi connection message
+  lcd.println("\nConnecting to Wi-Fi - please wait...");
   
   // Configure WiFiManager
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(10); // 10 second timeout for initial connection
-  wifiManager.setConnectTimeout(10); // 10 second connection timeout
+  wifiManager.setConnectTimeout(10);      // 10 second connection timeout
   
-  // Attempt WiFi connection
+  // Attempt Wi-Fi connection
   if (!wifiManager.autoConnect("T-Display-S3", "123456789")) {
     lcd.println("\nConnection timed out!");
-    lcd.println("\nA WiFi network has been created:");
+    lcd.println("\nA Wi-Fi network has been created:");
     lcd.println("SSID: T-Display-S3");
     lcd.println("Password: 123456789");
-    lcd.println("\nConnect to it and navigate to:");
-    lcd.println("192.168.4.1");
-    lcd.println("in a browser to setup your WiFi.");
+    lcd.println("\nConnect and navigate to: 192.168.4.1");
+    lcd.println("in a browser to setup your Wi-Fi.");
     
     // Start configuration portal
     wifiManager.setConfigPortalTimeout(0); // keep portal open indefinitely
-    wifiManager.startConfigPortal("T-DisplayS3", "123456789");
+    wifiManager.startConfigPortal("T-Display-S3", "123456789");
     
     // If we get here, configuration was completed
     lcd.fillScreen(TFT_BLACK);
@@ -456,7 +546,7 @@ void setup() {
   while(!getLocalTime(&timeinfo)) {
     if (millis() - syncStart > 10000) { // 10 second timeout
       lcd.println("\nTime sync failed!");
-      lcd.println("Check internet connection and restart to try again.");
+      lcd.println("Check internet connection and try again.");
       while(1); // halt execution
     }
   }
@@ -469,18 +559,18 @@ void setup() {
   delay(2000);
   
   // Weather data message
-  lcd.println("\nFetching weather data...");
+  lcd.println("\nFetching weather data - please wait...");
   
   // Attempt to fetch location data
   if (!getLocationCords()) {
     lcd.println("\nFailed to get location!");
-    lcd.println("Check location name in the code and restart to try again.");
+    lcd.println("Check location name in the code and try again.");
     while(1); // halt execution
   }
   getWeatherData();
 
   // Weather data fetch complete
-  lcd.println("Weather data received!");
+  lcd.println("Weather data received!\nLoading final assets...");
   
   // Generate 13 levels of grey
   int co = 210;
@@ -501,6 +591,11 @@ void setup() {
 
 // MAIN LOOP
 void loop() {
+  // Call functions & update display
+  adjustBrightness();
   updateData();
+  updateFPS();
   drawDisplay();
+
+  delay(1); // small delay to free up CPU cycles
 }
