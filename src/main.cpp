@@ -348,6 +348,12 @@ void updateData() {
   }
 }
 
+// Function to get WiFi signal strength in dBm
+String WiFiSignalStrength() {
+  long rssi = WiFi.RSSI();
+  return String(rssi) + "dBm";
+}
+
 // Function to calculate and update FPS
 void updateFPS() {
   // Calculate FPS
@@ -375,38 +381,43 @@ void drawDisplay() {
   
   sprite.loadFont(font18);
   sprite.setTextColor(greys[7], TFT_BLACK);
-  sprite.drawString("LOC:", 11, 110); // changed from 6 to 11
+  sprite.drawString("LOC:", 11, 110);
   sprite.setTextColor(greys[2], TFT_BLACK);
-  sprite.drawString(units == "metric" ? "C" : "F", 19, 50); // changed from 14 to 19
-  sprite.fillCircle(13, 52, 2, greys[2]); // changed from 8 to 13
+  sprite.drawString(units == "metric" ? "C" : "F", 19, 52);
+  sprite.fillCircle(13, 54, 2, greys[2]);
   
   sprite.setTextColor(greys[3], TFT_BLACK);
-  sprite.drawString(location, 45, 110); // changed from 40 to 45
+  sprite.drawString(location, 45, 110);
   sprite.unloadFont();
   
   // Draw time (without seconds)
   sprite.loadFont(tinyFont);
   sprite.setTextColor(greys[4], TFT_BLACK);
-  sprite.drawString(rtc.getTime().substring(0, 5), 10, 132); // changed from 6 to 10
+  sprite.drawString(rtc.getTime().substring(0, 5), 10, 132);
   sprite.unloadFont();
   
-  // Static text elements
+  // Static text element
   sprite.setTextColor(greys[5], TFT_BLACK);
-  sprite.drawString("INTERNET", 86, 10);
-  sprite.drawString("STATION", 86, 20);
+  sprite.drawString("INTERNET", 85, 10);
+  sprite.drawString("STATION", 85, 20);
+
+  sprite.drawString("WiFi signal:", 10, 37);
+
+  // Wi-Fi signal strength
+  sprite.drawString(WiFiSignalStrength(), 85, 37);
   
   // Main temperature display
   sprite.setTextDatum(4);
   sprite.loadFont(bigFont);
   sprite.setTextColor(greys[0], TFT_BLACK);
-  sprite.drawFloat(temperature, 1, 74, 80);
+  sprite.drawFloat(temperature, 1, 74, 82);
   sprite.unloadFont();
   
   // Seconds display
-  sprite.fillRoundRect(92, 132, 23, 22, 2, greys[2]); // changed from 80 to 90 | changed from 22 to 23
+  sprite.fillRoundRect(92, 132, 23, 22, 2, greys[2]);
   sprite.loadFont(font18);
   sprite.setTextColor(TFT_BLACK, greys[2]);
-  sprite.drawString(rtc.getTime().substring(6, 8), 103, 145); // changed from 96 to 103
+  sprite.drawString(rtc.getTime().substring(6, 8), 103, 145);
   sprite.unloadFont();
   sprite.setTextDatum(0);
 
@@ -446,7 +457,7 @@ void drawDisplay() {
   
   sprite.loadFont(font18);
   sprite.setTextColor(greys[7], greys[10]);
-  sprite.drawString("T", 158, 65); // changed from 58 to 65
+  sprite.drawString("T", 158, 65);
   sprite.unloadFont();
   
   // Weather metrics boxes
@@ -465,9 +476,9 @@ void drawDisplay() {
   errSprite.pushToSprite(&sprite, 148, 150);
   
   sprite.setTextColor(greys[4], bck);
-  sprite.drawString("CURRENT INFO", 182, 142); // changed from 141 to 142
-  sprite.setTextColor(greys[7], bck);          // changed from greys[9] to greys[7]
-  sprite.drawString("UPDATES: " + String(updatesCounter), 272, 142); // changed from 277 to 272 | 141 to 142
+  sprite.drawString("CURRENT INFO", 182, 142);
+  sprite.setTextColor(greys[7], bck);
+  sprite.drawString("UPDATES:" + String(updatesCounter), 285, 142);
   
   // Push final sprite to display
   sprite.pushSprite(0, 0);
